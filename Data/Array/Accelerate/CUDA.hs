@@ -187,14 +187,11 @@ module Data.Array.Accelerate.CUDA (
   Arrays,
 
   -- * Synchronous execution
-  run, run1,  runIn, run1In,
+  run, run1,  runIn, run1In, stream, streamIn,
 
   -- * Asynchronous execution
   module Data.Array.Accelerate.CUDA.Async,
-  runAsync, run1Async, runAsyncIn, run1AsyncIn,
-
-  -- * Concurrent execution
-  stream, streamIn,
+  runAsync, run1Async, runAsyncIn, run1AsyncIn, streamAsync, streamAsyncIn,
 
   -- * Execution contexts
   Context, create, destroy,
@@ -254,7 +251,7 @@ runAsync a
 -- | As 'run', but execute using the specified device context rather than using
 -- the default, automatically selected device.
 --
--- Devices passed to this function may all refer to the same device, or to
+-- Contexts passed to this function may all refer to the same device, or to
 -- separate devices of differing compute capabilities.
 --
 -- Note that each thread has a stack of current contexts, and calling
@@ -278,9 +275,8 @@ runAsyncIn :: Arrays a => [Context] -> Acc a -> Async a
 runAsyncIn ctxs a = unsafePerformIO $ do
     !ctx   <- choseContextIn ctxs
     !comp  <- evalCUDA ctx (compileAcc acc) >>= dumpStats
-    !_     <- push ana ctx
     --
-    evalCUDA ctx (executeAcc comp >>= collect)
+    push ana ctx >> evalCUDA ctx (executeAcc comp >>= collect)
   where
     !acc  = convertAccWith config a
     !ana  = analyseAcc acc
@@ -342,9 +338,8 @@ run1AsyncIn :: (Arrays a, Arrays b) => [Context] -> (Acc a -> Acc b) -> a -> Asy
 run1AsyncIn ctxs f arrs = unsafePerformIO $ do
     !ctx   <- choseContextIn ctxs
     !afun  <- evalCUDA ctx (compileAfun acc) >>= dumpStats
-    !_     <- push ana ctx
     --
-    evalCUDA ctx (executeAfun1 afun arrs >>= collect)
+    push ana ctx >> evalCUDA ctx (executeAfun1 afun arrs >>= collect)
   where
     !acc  = convertAfunWith config f
     !ana  = analyseAfun acc arrs
@@ -367,12 +362,18 @@ stream f
 streamIn :: (Arrays a, Arrays b) => [Context] -> (Acc a -> Acc b) -> [a] -> [b]
 streamIn ctxs f arrs = map (unsafePerformIO . wait) asyncs
   where
-    !asyncs = streamInAsync ctxs f arrs
+    !asyncs = streamAsyncIn ctxs f arrs
+
+streamAsync :: (Arrays a, Arrays b) => (Acc a -> Acc b) -> [a] -> [Async b]
+streamAsync f
+  = unsafePerformIO
+  $ evaluate (streamAsyncIn defaultContexts f)
+
 
 -- | As 'streamIn', but execute asynchronously.
 --   Only compile and analyse the accelerate function once
-streamInAsync :: (Arrays a, Arrays b) => [Context] -> (Acc a -> Acc b) -> [a] -> [Async b]
-streamInAsync ctxs f arrs = unsafePerformIO $ mapM execute arrs
+streamAsyncIn :: (Arrays a, Arrays b) => [Context] -> (Acc a -> Acc b) -> [a] -> [Async b]
+streamAsyncIn ctxs f arrs = unsafePerformIO $ mapM execute arrs
   where
     !acc  = convertAfunWith config f
     !ana  = analyseAfun acc (head arrs)
@@ -380,9 +381,8 @@ streamInAsync ctxs f arrs = unsafePerformIO $ mapM execute arrs
     execute a = do
       !ctx   <- choseContextIn ctxs
       !afun  <- evalCUDA ctx (compileAfun acc) >>= dumpStats
-      !_     <- push ana ctx
       --
-      evalCUDA ctx (executeAfun1 afun a >>= collect)
+      push ana ctx >> evalCUDA ctx (executeAfun1 afun a >>= collect)
 
 
 -- Copy arrays from device to host asynchronously.
