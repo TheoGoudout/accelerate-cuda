@@ -28,11 +28,11 @@ import qualified Foreign.CUDA.Driver    as CUDA
 -- Ignore the possibility of emulation-mode devices, as this has been deprecated
 -- as of CUDA v3.0 (compute-capability == 9999.9999)
 --
-selectBestDevice :: IO (Device, DeviceProperties)
-selectBestDevice = do
+availableDevices :: IO [(Device, DeviceProperties)]
+availableDevices = do
   dev   <- mapM CUDA.device . enumFromTo 0 . subtract 1 =<< CUDA.count
   prop  <- mapM CUDA.props dev
-  return . head . sortBy (flip cmp `on` snd) $ zip dev prop
+  return . sortBy (flip cmp `on` snd) $ zip dev prop
   where
     compute     = computeCapability
     flops d     = multiProcessorCount d * coresPerMultiProcessor d * clockRate d

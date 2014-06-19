@@ -19,7 +19,7 @@ module Data.Array.Accelerate.CUDA.Array.Prim (
 
   DevicePtrs, HostPtrs,
 
-  mallocArray, indexArray,
+  mallocArray, indexArray, indexArrayAsync,
   useArray,  useArrayAsync,
   useDevicePtrs,
   copyArray, copyArrayPeer, copyArrayPeerAsync,
@@ -49,8 +49,10 @@ import qualified Foreign.CUDA.Driver.Texture            as CUDA
 
 -- friends
 import Data.Array.Accelerate.Array.Data
+import Data.Array.Accelerate.CUDA.Async
 import Data.Array.Accelerate.CUDA.Context
 import Data.Array.Accelerate.CUDA.Array.Table
+import Data.Array.Accelerate.CUDA.Execute.Event
 import qualified Data.Array.Accelerate.CUDA.Debug       as D
 
 #include "accelerate.h"
@@ -242,6 +244,26 @@ indexArray !ctx !mt !ad !i =
     message $ "indexArray: " ++ showBytes (sizeOf (undefined::a))
     CUDA.peekArray 1 (src `CUDA.advanceDevPtr` i) dst
     peek dst
+
+
+-- Read a single element from an array at the given row-major index
+--
+indexArrayAsync
+    :: forall e a. (ArrayElt e, DevicePtrs e ~ CUDA.DevicePtr a, Typeable e, Typeable a, Storable a)
+    => Context
+    -> MemoryTable
+    -> ArrayData e
+    -> Int
+    -> CUDA.Stream
+    -> IO (Async a)
+indexArrayAsync !ctx !mt !ad !i !st =
+  alloca                            $ \dst ->
+  devicePtrsOfArrayData ctx mt ad >>= \src -> do
+    message $ "indexArray: " ++ showBytes (sizeOf (undefined::a))
+    CUDA.peekArrayAsync 1 (src `CUDA.advanceDevPtr` i) (CUDA.HostPtr dst) (Just st)
+    event  <- waypoint st      -- Event triggered when array is ready
+    result <- peek dst               -- IO action to execute when ready
+    return $ Async event result
 
 
 -- Copy data between two device arrays. The operation is asynchronous with

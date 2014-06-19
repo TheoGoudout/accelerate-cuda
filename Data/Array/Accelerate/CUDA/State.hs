@@ -23,7 +23,7 @@ module Data.Array.Accelerate.CUDA.State (
   CIO, Context, evalCUDA,
 
   -- Querying execution state
-  defaultContext, deviceProperties, activeContext, kernelTable, memoryTable, streamReservoir,
+  defaultContexts, deviceProperties, activeContext, kernelTable, memoryTable, streamReservoir,
 
 ) where
 
@@ -112,11 +112,11 @@ theState
 -- context. The device is selected based on compute capability and estimated
 -- maximum throughput.
 --
-{-# NOINLINE defaultContext #-}
-defaultContext :: Context
-defaultContext = unsafePerformIO $ do
+{-# NOINLINE defaultContexts #-}
+defaultContexts :: [Context]
+defaultContexts = unsafePerformIO $ do
   message dump_gc "gc: initialise default context"
   CUDA.initialise []
-  (dev,_)       <- selectBestDevice
-  create dev [CUDA.SchedAuto]
+  devs          <- availableDevices
+  mapM (\(dev,_) -> create dev [CUDA.SchedAuto]) devs
 

@@ -254,7 +254,7 @@ buildExported hndl f = ef
     ef :: IO (StablePtr Afun)
     ef = do
       ctx <- deRefStablePtr hndl
-      newStablePtr (Afun (run1In ctx f) (undefined :: a) (undefined :: b))
+      newStablePtr (Afun (run1In [ctx] f) (undefined :: a) (undefined :: b))
 
 -- Utility functions
 -- ------------------

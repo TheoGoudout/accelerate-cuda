@@ -23,24 +23,23 @@
 module Data.Array.Accelerate.CUDA.Execute (
 
   -- * Execute a computation under a CUDA environment
-  executeAcc, executeAfun1
+  executeAcc, executeAfun1,
 
 ) where
 
 -- friends
 import Data.Array.Accelerate.CUDA.AST
+import Data.Array.Accelerate.CUDA.Async                         ( Async(..), after, streaming )
 import Data.Array.Accelerate.CUDA.State
 import Data.Array.Accelerate.CUDA.FullList                      ( FullList(..), List(..) )
 import Data.Array.Accelerate.CUDA.Array.Data
 import Data.Array.Accelerate.CUDA.Array.Sugar
+import Data.Array.Accelerate.CUDA.Execute.Stream                ( Stream )
 import Data.Array.Accelerate.CUDA.Foreign.Import                ( canExecuteAcc )
 import Data.Array.Accelerate.CUDA.CodeGen.Base                  ( Name, namesOfArray, groupOfInt )
-import Data.Array.Accelerate.CUDA.Execute.Event                 ( Event )
-import Data.Array.Accelerate.CUDA.Execute.Stream                ( Stream )
 import qualified Data.Array.Accelerate.CUDA.Array.Prim          as Prim
 import qualified Data.Array.Accelerate.CUDA.Debug               as D
 import qualified Data.Array.Accelerate.CUDA.Execute.Event       as Event
-import qualified Data.Array.Accelerate.CUDA.Execute.Stream      as Stream
 
 import Data.Array.Accelerate.Tuple
 import Data.Array.Accelerate.Interpreter                        ( evalPrim, evalPrimConst, evalPrj )
@@ -54,7 +53,6 @@ import Prelude                                                  hiding ( exp, su
 import Control.Applicative                                      hiding ( Const )
 import Control.Monad                                            ( join, when, liftM )
 import Control.Monad.Reader                                     ( asks )
-import Control.Monad.State                                      ( gets )
 import Control.Monad.Trans                                      ( MonadIO, liftIO )
 import System.IO.Unsafe                                         ( unsafeInterleaveIO )
 import Data.Int
@@ -67,14 +65,6 @@ import qualified Data.HashMap.Strict                            as Map
 
 #include "accelerate.h"
 
-
--- Asynchronous kernel execution
--- -----------------------------
-
--- Arrays with an associated CUDA Event that will be signalled once the
--- computation has completed.
---
-data Async a = Async {-# UNPACK #-} !Event !a
 
 -- Valuation for an environment of asynchronous array computations
 --
@@ -89,30 +79,6 @@ aprj :: Idx env t -> Aval env -> Async t
 aprj ZeroIdx       (Apush _   x) = x
 aprj (SuccIdx idx) (Apush val _) = aprj idx val
 aprj _             _             = INTERNAL_ERROR(error) "aprj" "inconsistent valuation"
-
-
--- All work submitted to the given stream will occur after the asynchronous
--- event for the given array has been fulfilled. Synchronisation is performed
--- efficiently on the device. This function returns immediately.
---
-after :: MonadIO m => Stream -> Async a -> m a
-after stream (Async event arr) = liftIO $ Event.after event stream >> return arr
-
-
--- Block the calling thread until the event for the given array computation
--- is recorded.
---
-wait :: MonadIO m => Async a -> m a
-wait (Async e x) = liftIO $ Event.block e >> return x
-
-
--- Execute the given computation in a unique execution stream.
---
-streaming :: (Stream -> CIO a) -> CIO (Async a)
-streaming action = do
-  context   <- asks activeContext
-  reservoir <- gets streamReservoir
-  uncurry Async <$> Stream.streaming context reservoir action
 
 
 -- Array expression evaluation
@@ -131,12 +97,12 @@ streaming action = do
 --    memory allocated for the result, and the kernel(s) that implement the
 --    skeleton are invoked
 --
-executeAcc :: Arrays a => ExecAcc a -> CIO a
-executeAcc !acc = wait =<< streaming (executeOpenAcc acc Aempty)
+executeAcc :: Arrays a => ExecAcc a -> CIO (Async a)
+executeAcc !acc = streaming (executeOpenAcc acc Aempty)
 
-executeAfun1 :: (Arrays a, Arrays b) => ExecAfun (a -> b) -> a -> CIO b
+executeAfun1 :: (Arrays a, Arrays b) => ExecAfun (a -> b) -> a -> CIO (Async b)
 executeAfun1 !afun !arrs = do
-  Async event () <- streaming $ \st -> useArrays (arrays arrs) (fromArr arrs) st
+  Async event () <- streaming $ useArrays (arrays arrs) (fromArr arrs)
   executeOpenAfun1 afun Aempty (Async event arrs)
   where
     useArrays :: ArraysR arrs -> arrs -> Stream -> CIO ()
@@ -144,8 +110,8 @@ executeAfun1 !afun !arrs = do
     useArrays (ArraysRpair r1 r0) (a1, a0) st = useArrays r1 a1 st >> useArrays r0 a0 st
     useArrays ArraysRarray        arr      st = useArrayAsync arr (Just st)
 
-executeOpenAfun1 :: PreOpenAfun ExecOpenAcc aenv (a -> b) -> Aval aenv -> Async a -> CIO b
-executeOpenAfun1 (Alam (Abody f)) aenv x = wait =<< streaming (executeOpenAcc f (aenv `Apush` x))
+executeOpenAfun1 :: PreOpenAfun ExecOpenAcc aenv (a -> b) -> Aval aenv -> Async a -> CIO (Async b)
+executeOpenAfun1 (Alam (Abody f)) aenv x = streaming (executeOpenAcc f (aenv `Apush` x))
 executeOpenAfun1 _                _    _ = error "the sword comes out after you swallow it, right?"
 
 
@@ -171,12 +137,12 @@ executeOpenAcc (ExecAcc (FL () kernel more) !gamma !pacc) !aenv !stream
       Alet bnd body             -> streamA bnd >>= \x -> executeOpenAcc body (aenv `Apush` x) stream
       Atuple tup                -> toTuple <$> travT tup
       Aprj ix tup               -> evalPrj ix . fromTuple <$> travA tup
-      Apply f a                 -> executeOpenAfun1 f aenv =<< streamA a
+      Apply f a                 -> after stream =<< executeOpenAfun1 f aenv =<< streamA a
       Acond p t e               -> travE p >>= \x -> if x then travA t else travA e
       Awhile p f a              -> awhile p f =<< travA a
 
       -- Foreign
-      Aforeign ff afun a        -> fromMaybe (executeAfun1 afun) (canExecuteAcc ff) =<< travA a
+      Aforeign ff afun a        -> fromMaybe (\arrs -> executeAfun1 afun arrs >>= after stream ) (canExecuteAcc ff) =<< travA a
 
       -- Producers
       Map _ a                   -> executeOp =<< extent a
@@ -225,9 +191,9 @@ executeOpenAcc (ExecAcc (FL () kernel more) !gamma !pacc) !aenv !stream
     awhile :: PreOpenAfun ExecOpenAcc aenv (a -> Scalar Bool) -> PreOpenAfun ExecOpenAcc aenv (a -> a) -> a -> CIO a
     awhile p f a = do
       nop <- liftIO Event.create                -- record event never call, so this is a functional no-op
-      r   <- executeOpenAfun1 p aenv (Async nop a)
-      ok  <- indexArray r 0                     -- TLM TODO: memory manager should remember what is already on the host
-      if ok then awhile p f =<< executeOpenAfun1 f aenv (Async nop a)
+      r   <- after stream =<< executeOpenAfun1 p aenv (Async nop a)
+      ok  <- after stream =<< indexArrayAsync r 0 stream         -- TLM TODO: memory manager should remember what is already on the host
+      if ok then awhile p f =<< after stream =<< executeOpenAfun1 f aenv (Async nop a)
             else return a
 
     -- get the extent of an embedded array
@@ -447,8 +413,8 @@ executeOpenExp !rootExp !env !aenv !stream = travE rootExp
       Intersect sh1 sh2         -> intersect <$> travE sh1 <*> travE sh2
       ShapeSize sh              -> size  <$> travE sh
       Shape acc                 -> shape <$> travA acc
-      Index acc ix              -> join $ index      <$> travA acc <*> travE ix
-      LinearIndex acc ix        -> join $ indexArray <$> travA acc <*> travE ix
+      Index acc ix              -> join $ index       <$> travA acc <*> travE ix
+      LinearIndex acc ix        -> join $ indexLinear <$> travA acc <*> travE ix
       Foreign _ f x             -> foreign f x
 
     -- Helpers
@@ -501,7 +467,10 @@ executeOpenExp !rootExp !env !aenv !stream = travE rootExp
         extend (SliceFixed sliceIdx) (slx, sz) sh       = (extend sliceIdx slx sh, sz)
 
     index :: (Shape sh, Elt e) => Array sh e -> sh -> CIO e
-    index !arr !ix = indexArray arr (toIndex (shape arr) ix)
+    index !arr !ix = after stream =<< indexArrayAsync arr (toIndex (shape arr) ix) stream
+
+    indexLinear :: (Shape sh, Elt e) => Array sh e -> Int -> CIO e
+    indexLinear !arr !n = after stream =<< indexArrayAsync arr n stream
 
 
 -- Marshalling data
@@ -651,16 +620,15 @@ execute :: Marshalable args
         -> CIO ()
 execute !kernel !gamma !aenv !n !a !stream = do
   args <- arguments kernel aenv gamma a stream
-  launch kernel (configure kernel n) args stream
-
+  launch kernel (configure kernel n) args stream 
 
 -- Execute a device function, with the given thread configuration and function
 -- parameters. The tuple contains (threads per block, grid size, shared memory)
 --
 launch :: AccKernel a -> (Int,Int,Int) -> [CUDA.FunParam] -> Stream -> CIO ()
 launch (AccKernel entry !fn _ _ _ _ _) !(cta, grid, smem) !args !stream
-  = D.timed D.dump_exec msg
-  $ liftIO $ CUDA.launchKernel fn (grid,1,1) (cta,1,1) smem (Just stream) args
+  = D.timed D.dump_exec msg $
+  liftIO $ CUDA.launchKernel fn (grid,1,1) (cta,1,1) smem (Just stream) args
   where
     msg gpuTime cpuTime
       = "exec: " ++ entry ++ "<<< " ++ shows grid ", " ++ shows cta ", " ++ shows smem " >>> "

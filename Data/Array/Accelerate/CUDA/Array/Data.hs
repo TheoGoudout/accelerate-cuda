@@ -18,7 +18,7 @@
 module Data.Array.Accelerate.CUDA.Array.Data (
 
   -- * Array operations and representations
-  mallocArray, indexArray,
+  mallocArray, indexArray, indexArrayAsync, 
   useArray,  useArrayAsync,
   useDevicePtrs,
   copyArray, copyArrayPeer, copyArrayPeerAsync,
@@ -39,7 +39,7 @@ import qualified Prelude                                as P
 import Control.Applicative
 import Control.Monad.Reader                             ( asks )
 import Control.Monad.State                              ( gets )
-import Control.Monad.Trans                              ( liftIO )
+import Control.Monad.Trans                              ( MonadIO, liftIO )
 import Foreign.C.Types
 import Foreign.Ptr
 
@@ -47,6 +47,7 @@ import Foreign.Ptr
 import Data.Array.Accelerate.Array.Data
 import Data.Array.Accelerate.Array.Sugar                ( Array(..), Shape, Elt, toElt, EltRepr )
 import Data.Array.Accelerate.Array.Representation       ( size )
+import Data.Array.Accelerate.CUDA.Async
 import Data.Array.Accelerate.CUDA.State
 import Data.Array.Accelerate.CUDA.Array.Table
 import qualified Data.Array.Accelerate.CUDA.Array.Prim  as Prim
@@ -239,6 +240,69 @@ indexArray (Array _ !adata) i = run doIndex
         indexR ArrayEltRbool             ad = toBool  <$> Prim.indexArray ctx mt ad i
           where toBool 0 = False
                 toBool _ = True
+
+
+-- |Read a single element from an array at the given row-major index. This is a
+-- synchronous operation.
+--
+indexArrayAsync :: (Shape dim, Elt e) => Array dim e -> Int -> CUDA.Stream -> CIO (Async e)
+indexArrayAsync (Array _ !adata) i !st = do
+  ctx <- asks activeContext
+  mt  <- gets memoryTable
+  doIndex ctx mt 
+  where
+    doIndex !ctx !mt = streaming $ \st' -> do
+      async <- after st' =<< indexR arrayElt adata
+      return $ toElt async
+      where
+        indexR :: ArrayEltR e -> ArrayData e -> CIO (Async e)
+        indexR ArrayEltRunit             _  = streaming $ \_ -> return ()
+        indexR (ArrayEltRpair aeR1 aeR2) ad = 
+          streaming $ \st'' -> do
+            async1 <- indexR aeR1 (fst ad)
+            async2 <- indexR aeR2 (snd ad)
+            --
+            arr1 <- after st'' async1
+            arr2 <- after st'' async2
+            --
+            return (arr1,arr2)
+        --
+        indexR ArrayEltRint              ad = liftIO $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRint8             ad = liftIO $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRint16            ad = liftIO $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRint32            ad = liftIO $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRint64            ad = liftIO $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRword             ad = liftIO $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRword8            ad = liftIO $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRword16           ad = liftIO $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRword32           ad = liftIO $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRword64           ad = liftIO $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRfloat            ad = liftIO $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRdouble           ad = liftIO $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRchar             ad = liftIO $ Prim.indexArrayAsync ctx mt ad i st
+        --
+        indexR ArrayEltRcshort           ad = liftAsyncIO CShort  $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRcushort          ad = liftAsyncIO CUShort $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRcint             ad = liftAsyncIO CInt    $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRcuint            ad = liftAsyncIO CUInt   $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRclong            ad = liftAsyncIO CLong   $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRculong           ad = liftAsyncIO CULong  $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRcllong           ad = liftAsyncIO CLLong  $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRcullong          ad = liftAsyncIO CULLong $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRcchar            ad = liftAsyncIO CChar   $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRcschar           ad = liftAsyncIO CSChar  $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRcuchar           ad = liftAsyncIO CUChar  $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRcfloat           ad = liftAsyncIO CFloat  $ Prim.indexArrayAsync ctx mt ad i st
+        indexR ArrayEltRcdouble          ad = liftAsyncIO CDouble $ Prim.indexArrayAsync ctx mt ad i st
+        --
+        indexR ArrayEltRbool             ad = liftAsyncIO toBool  $ Prim.indexArrayAsync ctx mt ad i st
+          where toBool 0 = False
+                toBool _ = True
+
+        liftAsyncIO :: MonadIO m => (a -> b) -> IO (Async a) -> m (Async b)
+        liftAsyncIO f async = do
+          Async event a <- liftIO async
+          return $ Async event (f a)
 
 
 -- |Copy data between two device arrays. The operation is asynchronous with

@@ -38,7 +38,6 @@ import Text.PrettyPrint
 import qualified Foreign.CUDA.Driver                    as CUDA hiding ( device )
 import qualified Foreign.CUDA.Driver.Context            as CUDA
 
-
 -- | The execution context
 --
 data Context = Context {

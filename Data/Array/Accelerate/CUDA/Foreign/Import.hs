@@ -62,6 +62,7 @@ import Data.Array.Accelerate.CUDA.Context
 import Data.Array.Accelerate.CUDA.Array.Sugar
 import Data.Array.Accelerate.CUDA.Array.Data
 import Data.Array.Accelerate.CUDA.Array.Prim            ( DevicePtrs )
+import Data.Array.Accelerate.CUDA.Analysis.Context      ( choseContextIn )
 
 import Data.Typeable
 import Control.Exception                                ( bracket_ )
@@ -142,5 +143,7 @@ inContext ctx = bracket_ (push ctx) pop
 -- |Run an IO action in the default Acclerate context
 --
 inDefaultContext :: IO a -> IO a
-inDefaultContext = inContext defaultContext
+inDefaultContext action = do
+  ctx <- choseContextIn defaultContexts
+  inContext ctx action
 
