@@ -118,5 +118,5 @@ defaultContexts = unsafePerformIO $ do
   message dump_gc "gc: initialise default context"
   CUDA.initialise []
   devs          <- availableDevices
-  mapM (\(dev,_) -> create dev [CUDA.SchedAuto]) devs
+  mapM (\(dev,_) -> create dev [CUDA.SchedAuto,CUDA.MapHost]) devs
 

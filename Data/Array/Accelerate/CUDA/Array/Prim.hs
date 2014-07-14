@@ -21,6 +21,7 @@ module Data.Array.Accelerate.CUDA.Array.Prim (
 
   mallocArray, indexArray, indexArrayAsync,
   useArray,  useArrayAsync,
+  registerArray, unregisterArray,
   useDevicePtrs,
   copyArray, copyArrayPeer, copyArrayPeerAsync,
   peekArray, peekArrayAsync,
@@ -49,10 +50,8 @@ import qualified Foreign.CUDA.Driver.Texture            as CUDA
 
 -- friends
 import Data.Array.Accelerate.Array.Data
-import Data.Array.Accelerate.CUDA.Async
 import Data.Array.Accelerate.CUDA.Context
 import Data.Array.Accelerate.CUDA.Array.Table
-import Data.Array.Accelerate.CUDA.Execute.Event
 import qualified Data.Array.Accelerate.CUDA.Debug       as D
 
 #include "accelerate.h"
@@ -228,6 +227,26 @@ useDevicePtrs !ctx !mt !ptr !n0 =
     insertRemote ctx mt adata ptr
     return adata
 
+-- | Memory allocated for the array becomes pinned memory
+--
+registerArray
+    :: forall e a. (ArrayElt e, ArrayPtrs e ~ Ptr a, DevicePtrs e ~ CUDA.DevicePtr a, Typeable a, Typeable e, Storable a)
+    => ArrayData e
+    -> Int
+    -> IO ()
+registerArray !ad !i =
+  CUDA.registerArray [CUDA.DeviceMapped] i (ptrsOfArrayData ad) >> return ()
+
+
+-- | Memory allocated for the array becomes page-locked memory
+--
+unregisterArray
+    :: forall e a. (ArrayElt e, ArrayPtrs e ~ Ptr a, DevicePtrs e ~ CUDA.DevicePtr a, Typeable a, Typeable e, Storable a)
+    => ArrayData e
+    -> IO ()
+unregisterArray !ad =
+  CUDA.unregisterArray (CUDA.HostPtr $ ptrsOfArrayData ad) >> return ()
+
 
 -- Read a single element from an array at the given row-major index
 --
@@ -246,24 +265,21 @@ indexArray !ctx !mt !ad !i =
     peek dst
 
 
--- Read a single element from an array at the given row-major index
+-- Read a single element from an array asynchronously at the given row-major index
 --
 indexArrayAsync
-    :: forall e a. (ArrayElt e, DevicePtrs e ~ CUDA.DevicePtr a, Typeable e, Typeable a, Storable a)
+    :: forall e a. (ArrayElt e, ArrayPtrs e ~ Ptr a, DevicePtrs e ~ CUDA.DevicePtr a, Typeable e, Typeable a, Storable a)
     => Context
     -> MemoryTable
     -> ArrayData e
+    -> ArrayData e
     -> Int
-    -> CUDA.Stream
-    -> IO (Async a)
-indexArrayAsync !ctx !mt !ad !i !st =
-  alloca                            $ \dst ->
-  devicePtrsOfArrayData ctx mt ad >>= \src -> do
-    message $ "indexArray: " ++ showBytes (sizeOf (undefined::a))
-    CUDA.peekArrayAsync 1 (src `CUDA.advanceDevPtr` i) (CUDA.HostPtr dst) (Just st)
-    event  <- waypoint st      -- Event triggered when array is ready
-    result <- peek dst               -- IO action to execute when ready
-    return $ Async event result
+    -> Maybe CUDA.Stream
+    -> IO ()
+indexArrayAsync !ctx !mt !ad !ai !i !mst =
+  devicePtrsOfArrayData ctx mt ad >>= \src ->
+    transfer "indexArray" (sizeOf (undefined :: a)) $
+      CUDA.peekArrayAsync 1 (src `CUDA.advanceDevPtr` i) (CUDA.HostPtr $ ptrsOfArrayData ai) mst
 
 
 -- Copy data between two device arrays. The operation is asynchronous with

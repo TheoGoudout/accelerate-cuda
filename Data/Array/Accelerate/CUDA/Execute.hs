@@ -29,7 +29,7 @@ module Data.Array.Accelerate.CUDA.Execute (
 
 -- friends
 import Data.Array.Accelerate.CUDA.AST
-import Data.Array.Accelerate.CUDA.Async                         ( Async(..), after, streaming )
+import Data.Array.Accelerate.CUDA.Execute.Async                 ( Async(..), after, streaming )
 import Data.Array.Accelerate.CUDA.State
 import Data.Array.Accelerate.CUDA.FullList                      ( FullList(..), List(..) )
 import Data.Array.Accelerate.CUDA.Array.Data
@@ -103,15 +103,15 @@ executeAcc !acc = streaming (executeOpenAcc acc Aempty)
 executeAfun1 :: (Arrays a, Arrays b) => ExecAfun (a -> b) -> a -> CIO (Async b)
 executeAfun1 !afun !arrs = do
   Async event () <- streaming $ useArrays (arrays arrs) (fromArr arrs)
-  executeOpenAfun1 afun Aempty (Async event arrs)
+  streaming $ executeOpenAfun1 afun Aempty (Async event arrs)
   where
     useArrays :: ArraysR arrs -> arrs -> Stream -> CIO ()
     useArrays ArraysRunit         ()       _  = return ()
     useArrays (ArraysRpair r1 r0) (a1, a0) st = useArrays r1 a1 st >> useArrays r0 a0 st
     useArrays ArraysRarray        arr      st = useArrayAsync arr (Just st)
 
-executeOpenAfun1 :: PreOpenAfun ExecOpenAcc aenv (a -> b) -> Aval aenv -> Async a -> CIO (Async b)
-executeOpenAfun1 (Alam (Abody f)) aenv x = streaming (executeOpenAcc f (aenv `Apush` x))
+executeOpenAfun1 :: PreOpenAfun ExecOpenAcc aenv (a -> b) -> Aval aenv -> Async a -> Stream -> CIO b
+executeOpenAfun1 (Alam (Abody f)) aenv x = executeOpenAcc f (aenv `Apush` x)
 executeOpenAfun1 _                _    _ = error "the sword comes out after you swallow it, right?"
 
 
@@ -137,12 +137,12 @@ executeOpenAcc (ExecAcc (FL () kernel more) !gamma !pacc) !aenv !stream
       Alet bnd body             -> streamA bnd >>= \x -> executeOpenAcc body (aenv `Apush` x) stream
       Atuple tup                -> toTuple <$> travT tup
       Aprj ix tup               -> evalPrj ix . fromTuple <$> travA tup
-      Apply f a                 -> after stream =<< executeOpenAfun1 f aenv =<< streamA a
+      Apply f a                 -> streamA a >>= \async -> executeOpenAfun1 f aenv async stream
       Acond p t e               -> travE p >>= \x -> if x then travA t else travA e
       Awhile p f a              -> awhile p f =<< travA a
 
       -- Foreign
-      Aforeign ff afun a        -> fromMaybe (\arrs -> executeAfun1 afun arrs >>= after stream ) (canExecuteAcc ff) =<< travA a
+      Aforeign ff afun a        -> fromMaybe (\arrs -> executeAfun1 afun arrs >>= after stream) (canExecuteAcc ff) =<< travA a
 
       -- Producers
       Map _ a                   -> executeOp =<< extent a
@@ -188,12 +188,13 @@ executeOpenAcc (ExecAcc (FL () kernel more) !gamma !pacc) !aenv !stream
     travT NilAtup          = return ()
     travT (SnocAtup !t !a) = (,) <$> travT t <*> travA a
 
+    -- TODO : change indexArray to indexArrayAsync
     awhile :: PreOpenAfun ExecOpenAcc aenv (a -> Scalar Bool) -> PreOpenAfun ExecOpenAcc aenv (a -> a) -> a -> CIO a
     awhile p f a = do
-      nop <- liftIO Event.create                -- record event never call, so this is a functional no-op
-      r   <- after stream =<< executeOpenAfun1 p aenv (Async nop a)
-      ok  <- after stream =<< indexArrayAsync r 0 stream         -- TLM TODO: memory manager should remember what is already on the host
-      if ok then awhile p f =<< after stream =<< executeOpenAfun1 f aenv (Async nop a)
+      nop <- liftIO Event.create                  -- record event never call, so this is a functional no-op
+      r   <- executeOpenAfun1 p aenv (Async nop a) stream
+      ok  <- indexArray r 0                       -- TLM TODO: memory manager should remember what is already on the host
+      if ok then awhile p f =<< executeOpenAfun1 f aenv (Async nop a) stream
             else return a
 
     -- get the extent of an embedded array
@@ -466,11 +467,13 @@ executeOpenExp !rootExp !env !aenv !stream = travE rootExp
         extend (SliceAll sliceIdx)   (slx, ()) (sh, sz) = (extend sliceIdx slx sh, sz)
         extend (SliceFixed sliceIdx) (slx, sz) sh       = (extend sliceIdx slx sh, sz)
 
+    -- TODO : change indexArray to indexArrayAsync
     index :: (Shape sh, Elt e) => Array sh e -> sh -> CIO e
-    index !arr !ix = after stream =<< indexArrayAsync arr (toIndex (shape arr) ix) stream
+    index !arr !ix = indexArray arr (toIndex (shape arr) ix)
 
+    -- TODO : change indexArray to indexArrayAsync
     indexLinear :: (Shape sh, Elt e) => Array sh e -> Int -> CIO e
-    indexLinear !arr !n = after stream =<< indexArrayAsync arr n stream
+    indexLinear !arr !n = indexArray arr n
 
 
 -- Marshalling data

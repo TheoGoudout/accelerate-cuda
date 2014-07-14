@@ -190,7 +190,7 @@ module Data.Array.Accelerate.CUDA (
   run, run1,  runIn, run1In, stream, streamIn,
 
   -- * Asynchronous execution
-  module Data.Array.Accelerate.CUDA.Async,
+  Async(..), wait, after,
   runAsync, run1Async, runAsyncIn, run1AsyncIn, streamAsync, streamAsyncIn,
 
   -- * Execution contexts
@@ -201,21 +201,23 @@ module Data.Array.Accelerate.CUDA (
 
 -- standard library
 import Control.Exception
-import Control.Monad.Trans                              hiding ( lift )
+import Control.Monad.Trans                                 hiding ( lift )
+import Control.Monad.Reader                                ( asks )
 import System.IO.Unsafe
 
 -- friends
-import Data.Array.Accelerate.Trafo                      hiding ( convertAcc )
-import Data.Array.Accelerate.Smart                      ( Acc )
-import Data.Array.Accelerate.Array.Sugar                ( Arrays(..), ArraysR(..) )
-import Data.Array.Accelerate.CUDA.Async
-import Data.Array.Accelerate.CUDA.Array.Data
-import Data.Array.Accelerate.CUDA.Analysis.Context
-import Data.Array.Accelerate.CUDA.State
-import Data.Array.Accelerate.CUDA.Context               hiding ( push, pop )
-import Data.Array.Accelerate.CUDA.Compile
-import Data.Array.Accelerate.CUDA.Execute
+import Data.Array.Accelerate.Trafo                         hiding ( convertAcc )
+import Data.Array.Accelerate.Smart                         ( Acc )
+import Data.Array.Accelerate.Array.Sugar                   ( Arrays(..), ArraysR(..) )
 import Data.Array.Accelerate.CUDA.Analysis
+import Data.Array.Accelerate.CUDA.Analysis.Context
+import Data.Array.Accelerate.CUDA.Array.Data
+import Data.Array.Accelerate.CUDA.Async
+import Data.Array.Accelerate.CUDA.Compile
+import Data.Array.Accelerate.CUDA.Context                  hiding ( push, pop )
+import Data.Array.Accelerate.CUDA.Execute
+import Data.Array.Accelerate.CUDA.State
+import qualified Data.Array.Accelerate.CUDA.Execute.Async  as Exec
 
 #if ACCELERATE_DEBUG
 import Data.Array.Accelerate.Debug
@@ -264,7 +266,7 @@ runAsync a
 runIn :: Arrays a => [Context] -> Acc a -> a
 runIn ctxs a
   = unsafePerformIO
-  $ evaluate (runAsyncIn ctxs a) >>= wait
+  $ evaluate (runAsyncIn ctxs a) >>= waitSafe
 
 
 -- | As 'runIn', but execute asynchronously. Be sure not to destroy the context,
@@ -276,7 +278,7 @@ runAsyncIn ctxs a = unsafePerformIO $ do
     !ctx   <- choseContextIn ctxs
     !comp  <- evalCUDA ctx (compileAcc acc) >>= dumpStats
     --
-    push ana ctx >> evalCUDA ctx (executeAcc comp >>= collect)
+    push ana ctx >> evalCUDA ctx (executeAcc comp >>= collectAsync)
   where
     !acc  = convertAccWith config a
     !ana  = analyseAcc acc
@@ -330,7 +332,7 @@ run1Async f
 --
 run1In :: (Arrays a, Arrays b) => [Context] -> (Acc a -> Acc b) -> a -> b
 run1In !ctxs f = let go = run1AsyncIn ctxs f
-               in \a -> unsafePerformIO $ wait (go a)
+               in \a -> unsafePerformIO $ waitSafe (go a)
 
 -- | As 'run1In', but execute asynchronously.
 --
@@ -339,7 +341,7 @@ run1AsyncIn ctxs f arrs = unsafePerformIO $ do
     !ctx   <- choseContextIn ctxs
     !afun  <- evalCUDA ctx (compileAfun acc) >>= dumpStats
     --
-    push ana ctx >> evalCUDA ctx (executeAfun1 afun arrs >>= collect)
+    push ana ctx >> evalCUDA ctx (executeAfun1 afun arrs >>= collectAsync)
   where
     !acc  = convertAfunWith config f
     !ana  = analyseAfun acc arrs
@@ -360,10 +362,12 @@ stream f
 -- | As 'stream', but execute in the specified context.
 --
 streamIn :: (Arrays a, Arrays b) => [Context] -> (Acc a -> Acc b) -> [a] -> [b]
-streamIn ctxs f arrs = map (unsafePerformIO . wait) asyncs
+streamIn ctxs f arrs = unsafePerformIO $ mapM waitSafe asyncs
   where
     !asyncs = streamAsyncIn ctxs f arrs
 
+-- | As 'stream', but the computations are executed asynchronously.
+--
 streamAsync :: (Arrays a, Arrays b) => (Acc a -> Acc b) -> [a] -> [Async b]
 streamAsync f
   = unsafePerformIO
@@ -379,33 +383,31 @@ streamAsyncIn ctxs f arrs = unsafePerformIO $ mapM execute arrs
     !ana  = analyseAfun acc (head arrs)
     --
     execute a = do
-      !ctx   <- choseContextIn ctxs
-      !afun  <- evalCUDA ctx (compileAfun acc) >>= dumpStats
+      !ctx       <- choseContextIn ctxs
+      !afun      <- evalCUDA ctx (compileAfun acc) >>= dumpStats
       --
-      push ana ctx >> evalCUDA ctx (executeAfun1 afun a >>= collect)
+      push ana ctx
+      evalCUDA ctx (executeAfun1 afun a >>= collectAsync)
 
 
 -- Copy arrays from device to host asynchronously.
 --
-collect :: forall arrs. Arrays arrs => Async arrs -> CIO (Async arrs)
-collect !arrs = streaming $ \st -> do
-  arrs' <- after st arrs
-  sync  <- after st =<< collectR (arrays (undefined::arrs)) (fromArr arrs')
-  return $ toArr sync
+collectAsync :: forall arrs. Arrays arrs => Exec.Async arrs -> CIO (Async arrs)
+collectAsync !arrs = do
+  (Exec.Async event arr) <- Exec.streaming collect
+  --
+  ctx <- asks activeContext
+  return $ Async event arr ctx
   where
-    --
-    collectR :: ArraysR a -> a -> CIO (Async a)
-    collectR ArraysRunit         ()             = streaming $ \_  -> return ()
-    collectR ArraysRarray        arr            = streaming $ \st -> peekArrayAsync arr (Just st) >> return arr
-    collectR (ArraysRpair r1 r2) (arrs1, arrs2) = 
-      streaming $ \st -> do
-          async1 <- collectR r1 arrs1
-          async2 <- collectR r2 arrs2
-          --
-          arr1 <- after st async1
-          arr2 <- after st async2
-          --
-          return (arr1,arr2)
+    collect st = do
+      arrs' <- Exec.after st arrs
+      collectRAsync (arrays (undefined::arrs)) (fromArr arrs')
+      return arrs'
+      where
+        collectRAsync :: ArraysR a -> a -> CIO ()
+        collectRAsync ArraysRunit         ()             = return ()
+        collectRAsync ArraysRarray        arr            = peekArrayAsync arr (Just st)
+        collectRAsync (ArraysRpair r1 r2) (arrs1, arrs2) = collectRAsync r1 arrs1 >> collectRAsync r2 arrs2
 
 -- How the Accelerate program should be interpreted.
 -- TODO: make sharing/fusion runtime configurable via debug flags or otherwise.

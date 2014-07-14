@@ -25,7 +25,9 @@ import Data.Array.Accelerate.CUDA.Context               hiding ( push, pop )
 import Data.Array.Accelerate.CUDA.Analysis
 import qualified Data.Array.Accelerate.CUDA.Context     as Ctx
 
---
+-- | Informations relative to a device.
+-- Stocks its context and all the current tasks
+-- associated to it.
 --
 data DeviceInfo a = DeviceInfo {
     context :: Context,
@@ -79,8 +81,7 @@ push a !ctx = do
 -- | Thread safe
 --
 pop :: AnalysisAcc a -> Context -> IO (AnalysisAcc a)
-pop a !ctx =
-  atomicModifyIORef' state $ \devs -> (map delJob devs,a)
+pop a !ctx = atomicModifyIORef' state $ \devs -> (map delJob devs,a)
   where
     delJob dev =
       if ctx == context dev
@@ -94,8 +95,6 @@ lift = flip DeviceInfo []
 
 
 -- | Chose a context for the next computation within a given set of contexts
---
--- TODO : use the analysis as a part of the decision process
 --
 choseContextIn :: [Context] -> IO Context
 choseContextIn ctxs = do

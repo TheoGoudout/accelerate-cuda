@@ -1,3 +1,7 @@
+{-# LANGUAGE BangPatterns        #-}
+{-# LANGUAGE GADTs               #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
 -- |
 -- Module      : Data.Array.Accelerate.CUDA.Array.Sugar
 -- Copyright   : [2008..2010] Manuel M T Chakravarty, Gabriele Keller, Sean Lee
@@ -16,8 +20,11 @@ module Data.Array.Accelerate.CUDA.Array.Sugar (
 
 ) where
 
+import Control.Monad.IO.Class                           ( liftIO )
+
 import Data.Array.Accelerate.CUDA.State
 import Data.Array.Accelerate.CUDA.Array.Data
+import Data.Array.Accelerate.CUDA.Array.Registration    ( register )
 import Data.Array.Accelerate.Array.Sugar                hiding (newArray, allocateArray)
 import qualified Data.Array.Accelerate.Array.Sugar      as Sugar
 
@@ -30,6 +37,7 @@ newArray sh f =
   let arr = Sugar.newArray sh f
   in do
       useArray arr
+      liftIO $ register arr
       return arr
 
 
@@ -40,5 +48,5 @@ allocateArray sh =
   let arr = Sugar.allocateArray sh
   in do
       mallocArray arr
+      liftIO $ register arr
       return arr
-

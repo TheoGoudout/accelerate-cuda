@@ -137,6 +137,7 @@ Library
                         Data.Array.Accelerate.CUDA.Array.Data
                         Data.Array.Accelerate.CUDA.Array.Nursery
                         Data.Array.Accelerate.CUDA.Array.Prim
+                        Data.Array.Accelerate.CUDA.Array.Registration
                         Data.Array.Accelerate.CUDA.Array.Sugar
                         Data.Array.Accelerate.CUDA.Array.Table
                         Data.Array.Accelerate.CUDA.Async
@@ -154,6 +155,8 @@ Library
                         Data.Array.Accelerate.CUDA.Context
                         Data.Array.Accelerate.CUDA.Debug
                         Data.Array.Accelerate.CUDA.Execute
+                        Data.Array.Accelerate.CUDA.Execute.Async
+                        Data.Array.Accelerate.CUDA.Execute.Callback
                         Data.Array.Accelerate.CUDA.Execute.Event
                         Data.Array.Accelerate.CUDA.Execute.Stream
                         Data.Array.Accelerate.CUDA.Foreign.Export
